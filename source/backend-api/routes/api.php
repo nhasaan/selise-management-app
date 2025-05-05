@@ -10,8 +10,21 @@ use App\Http\Controllers\API\DepartmentController;
 |--------------------------------------------------------------------------
 */
 
-// Department routes
-Route::apiResource('departments', DepartmentController::class);
+// Apply API rate limiting to all routes
+Route::middleware('throttle:api')->group(function () {
+    // Department routes
+    Route::apiResource('departments', DepartmentController::class);
 
-// Employee routes
-Route::apiResource('employees', EmployeeController::class);
+    // Employee routes with specific rate limiting for list endpoint
+    Route::get('employees', [EmployeeController::class, 'index'])
+        ->middleware('throttle:employee-list');
+
+    Route::post('employees', [EmployeeController::class, 'store']);
+    Route::get('employees/{employee}', [EmployeeController::class, 'show']);
+    Route::put('employees/{employee}', [EmployeeController::class, 'update']);
+    Route::delete('employees/{employee}', [EmployeeController::class, 'destroy']);
+});
+
+Route::get('/test', function () {
+    return response()->json(['message' => 'API is working!']);
+});

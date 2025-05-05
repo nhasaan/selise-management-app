@@ -7,11 +7,11 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\EmployeeRequest;
 use App\Http\Resources\EmployeeCollection;
 use App\Http\Resources\EmployeeResource;
-use App\Models\Employee;
-use App\Models\EmployeeDetail;
+use App\Repositories\EmployeeRepository;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 /**
  * @OA\Info(
@@ -22,6 +22,19 @@ use Illuminate\Support\Facades\DB;
  */
 class EmployeeController extends Controller
 {
+    /**
+     * The employee repository implementation.
+     */
+    protected EmployeeRepository $repository;
+
+    /**
+     * Create a new controller instance.
+     */
+    public function __construct(EmployeeRepository $repository)
+    {
+        $this->repository = $repository;
+    }
+
     /**
      * @OA\Get(
      *     path="/api/employees",
@@ -92,60 +105,16 @@ class EmployeeController extends Controller
      */
     public function index(Request $request): EmployeeCollection
     {
-        $query = Employee::query()
-            ->with(['department', 'detail'])
-            ->select('employees.*');
+        // Generate cache key from request params
+        $cacheKey = 'employees_' . md5(json_encode($request->all()));
 
-        // Add join for sorting and filtering on detail fields
-        $query->join('employee_details', 'employees.id', '=', 'employee_details.employee_id');
+        // Try to get from cache first (5 minute TTL)
+        $employees = Cache::remember($cacheKey, now()->addMinutes(5), function () use ($request) {
+            return $this->repository->getEmployees($request->all());
+        });
 
-        // Apply filters
-        if ($request->filled('search')) {
-            $search = '%' . $request->input('search') . '%';
-            $query->where(function ($q) use ($search) {
-                $q->where('employees.name', 'like', $search)
-                    ->orWhere('employees.email', 'like', $search)
-                    ->orWhere('employee_details.designation', 'like', $search);
-            });
-        }
-
-        if ($request->filled('department_id')) {
-            $query->where('employees.department_id', $request->input('department_id'));
-        }
-
-        if ($request->filled('min_salary')) {
-            $query->where('employee_details.salary', '>=', $request->input('min_salary'));
-        }
-
-        if ($request->filled('max_salary')) {
-            $query->where('employee_details.salary', '<=', $request->input('max_salary'));
-        }
-
-        // Apply sorting
-        $sortBy = $request->input('sort_by', 'name');
-        $sortDir = $request->input('sort_dir', 'asc');
-
-        switch ($sortBy) {
-            case 'joined_date':
-                $query->orderBy('employee_details.joined_date', $sortDir);
-                break;
-            case 'salary':
-                $query->orderBy('employee_details.salary', $sortDir);
-                break;
-            case 'email':
-                $query->orderBy('employees.email', $sortDir);
-                break;
-            default:
-                $query->orderBy('employees.name', $sortDir);
-                break;
-        }
-
-        // Add a second order by to ensure consistent results
-        $query->orderBy('employees.id', 'asc');
-
-        // Get paginated results
-        $perPage = $request->input('per_page', 15);
-        $employees = $query->paginate($perPage);
+        // Track the key for later cache management
+        $this->trackCacheKey($cacheKey);
 
         return new EmployeeCollection($employees);
     }
@@ -175,32 +144,31 @@ class EmployeeController extends Controller
         $employeeData = EmployeeData::fromRequest($request);
 
         try {
-            DB::beginTransaction();
+            // Separate main employee data from detail data
+            $employee = $this->repository->create(
+                [
+                    'name' => $employeeData->name,
+                    'email' => $employeeData->email,
+                    'department_id' => $employeeData->department_id,
+                ],
+                [
+                    'designation' => $employeeData->designation,
+                    'salary' => $employeeData->salary,
+                    'address' => $employeeData->address,
+                    'joined_date' => $employeeData->joined_date,
+                ]
+            );
 
-            // Create employee
-            $employee = Employee::create([
-                'name' => $employeeData->name,
-                'email' => $employeeData->email,
-                'department_id' => $employeeData->department_id,
-            ]);
-
-            // Create employee detail
-            $employee->detail()->create([
-                'designation' => $employeeData->designation,
-                'salary' => $employeeData->salary,
-                'address' => $employeeData->address,
-                'joined_date' => $employeeData->joined_date,
-            ]);
-
-            DB::commit();
-
-            // Eager load relationships for the response
-            $employee->load(['department', 'detail']);
+            // Clear all list caches as this changes results
+            $this->clearEmployeeListCache();
 
             return response()->json(new EmployeeResource($employee), 201);
         } catch (\Exception $e) {
-            DB::rollBack();
-            return response()->json(['message' => 'Error creating employee: ' . $e->getMessage()], 500);
+            Log::error('Error creating employee: ' . $e->getMessage());
+            return response()->json([
+                'message' => 'Error creating employee',
+                'error' => app()->isLocal() ? $e->getMessage() : 'Server error'
+            ], 500);
         }
     }
 
@@ -229,11 +197,20 @@ class EmployeeController extends Controller
      */
     public function show(string $id): JsonResponse
     {
-        $employee = Employee::with(['department', 'detail'])->find($id);
+        // Cache key for this employee
+        $cacheKey = 'employee_' . $id;
+
+        // Cache for 30 minutes
+        $employee = Cache::remember($cacheKey, now()->addMinutes(30), function () use ($id) {
+            return $this->repository->findById($id);
+        });
 
         if (!$employee) {
             return response()->json(['message' => 'Employee not found'], 404);
         }
+
+        // Track the key for later cache management
+        $this->trackCacheKey($cacheKey);
 
         return response()->json(new EmployeeResource($employee));
     }
@@ -271,41 +248,39 @@ class EmployeeController extends Controller
      */
     public function update(EmployeeRequest $request, string $id): JsonResponse
     {
-        $employee = Employee::with('detail')->find($id);
-
-        if (!$employee) {
-            return response()->json(['message' => 'Employee not found'], 404);
-        }
-
         $employeeData = EmployeeData::fromRequest($request);
 
         try {
-            DB::beginTransaction();
+            // Separate main employee data from detail data
+            $employee = $this->repository->update(
+                $id,
+                [
+                    'name' => $employeeData->name,
+                    'email' => $employeeData->email,
+                    'department_id' => $employeeData->department_id,
+                ],
+                [
+                    'designation' => $employeeData->designation,
+                    'salary' => $employeeData->salary,
+                    'address' => $employeeData->address,
+                    'joined_date' => $employeeData->joined_date,
+                ]
+            );
 
-            // Update employee
-            $employee->update([
-                'name' => $employeeData->name,
-                'email' => $employeeData->email,
-                'department_id' => $employeeData->department_id,
-            ]);
+            if (!$employee) {
+                return response()->json(['message' => 'Employee not found'], 404);
+            }
 
-            // Update employee detail
-            $employee->detail->update([
-                'designation' => $employeeData->designation,
-                'salary' => $employeeData->salary,
-                'address' => $employeeData->address,
-                'joined_date' => $employeeData->joined_date,
-            ]);
-
-            DB::commit();
-
-            // Refresh the model with latest data
-            $employee->load(['department', 'detail']);
+            // Clear all caches as this changes results
+            $this->clearEmployeeCache($id);
 
             return response()->json(new EmployeeResource($employee));
         } catch (\Exception $e) {
-            DB::rollBack();
-            return response()->json(['message' => 'Error updating employee: ' . $e->getMessage()], 500);
+            Log::error('Error updating employee: ' . $e->getMessage());
+            return response()->json([
+                'message' => 'Error updating employee',
+                'error' => app()->isLocal() ? $e->getMessage() : 'Server error'
+            ], 500);
         }
     }
 
@@ -333,17 +308,64 @@ class EmployeeController extends Controller
      */
     public function destroy(string $id): JsonResponse
     {
-        $employee = Employee::find($id);
-
-        if (!$employee) {
-            return response()->json(['message' => 'Employee not found'], 404);
-        }
-
         try {
-            $employee->delete();
+            $deleted = $this->repository->delete($id);
+
+            if (!$deleted) {
+                return response()->json(['message' => 'Employee not found'], 404);
+            }
+
+            // Clear all caches as this changes results
+            $this->clearEmployeeCache($id);
+
             return response()->json(null, 204);
         } catch (\Exception $e) {
-            return response()->json(['message' => 'Error deleting employee: ' . $e->getMessage()], 500);
+            Log::error('Error deleting employee: ' . $e->getMessage());
+            return response()->json([
+                'message' => 'Error deleting employee',
+                'error' => app()->isLocal() ? $e->getMessage() : 'Server error'
+            ], 500);
+        }
+    }
+
+    /**
+     * Track a cache key for later management.
+     */
+    private function trackCacheKey(string $key): void
+    {
+        $keys = Cache::get('employee_cache_keys', []);
+
+        // Only add if not already tracked
+        if (!in_array($key, $keys)) {
+            $keys[] = $key;
+            Cache::put('employee_cache_keys', $keys, now()->addDay());
+        }
+    }
+
+    /**
+     * Clear cache for a specific employee and any list caches.
+     */
+    private function clearEmployeeCache(string $id): void
+    {
+        // Clear specific employee cache
+        Cache::forget('employee_' . $id);
+
+        // Clear all list caches too
+        $this->clearEmployeeListCache();
+    }
+
+    /**
+     * Clear all employee list caches.
+     */
+    private function clearEmployeeListCache(): void
+    {
+        // Find all list cache keys (those starting with 'employees_')
+        $keys = Cache::get('employee_cache_keys', []);
+
+        foreach ($keys as $key) {
+            if (strpos($key, 'employees_') === 0) {
+                Cache::forget($key);
+            }
         }
     }
 }
