@@ -24,7 +24,3 @@ Route::middleware('throttle:api')->group(function () {
     Route::put('employees/{employee}', [EmployeeController::class, 'update']);
     Route::delete('employees/{employee}', [EmployeeController::class, 'destroy']);
 });
-
-Route::get('/test', function () {
-    return response()->json(['message' => 'API is working!']);
-});

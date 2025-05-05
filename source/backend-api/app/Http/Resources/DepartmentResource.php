@@ -18,8 +18,8 @@ class DepartmentResource extends JsonResource
             'id' => $this->id,
             'name' => $this->name,
             'description' => $this->description,
-            'created_at' => $this->created_at->toISOString(),
-            'updated_at' => $this->updated_at->toISOString(),
+            'created_at' => $this->created_at ? $this->created_at->toISOString() : null,
+            'updated_at' => $this->updated_at ? $this->updated_at->toISOString() : null,
         ];
     }
 }
