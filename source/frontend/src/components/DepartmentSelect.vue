@@ -32,7 +32,7 @@
   
   <script setup>
   import { defineProps, defineEmits, computed } from 'vue'
-  import { useDepartmentStore } from '@/stores/departmentStore'
+  import { useDepartmentStore } from '@/store/departmentStore'
   
   const props = defineProps({
     modelValue: {

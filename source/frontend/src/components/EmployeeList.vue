@@ -5,19 +5,19 @@
         <tr>
           <th
             class="px-4 py-3 text-left cursor-pointer"
-            @click="$emit('sort', 'name')"
+            @click="readOnly ? null : $emit('sort', 'name')"
           >
             Name
-            <span v-if="sortKey === 'name'">
+            <span v-if="!readOnly && sortKey === 'name'">
               {{ sortDirection === 'asc' ? '▲' : '▼' }}
             </span>
           </th>
           <th
             class="px-4 py-3 text-left cursor-pointer"
-            @click="$emit('sort', 'email')"
+            @click="readOnly ? null : $emit('sort', 'email')"
           >
             Email
-            <span v-if="sortKey === 'email'">
+            <span v-if="!readOnly && sortKey === 'email'">
               {{ sortDirection === 'asc' ? '▲' : '▼' }}
             </span>
           </th>
@@ -25,14 +25,14 @@
           <th class="px-4 py-3 text-left">Designation</th>
           <th
             class="px-4 py-3 text-left cursor-pointer"
-            @click="$emit('sort', 'joined_date')"
+            @click="readOnly ? null : $emit('sort', 'joined_date')"
           >
             Joined Date
-            <span v-if="sortKey === 'joined_date'">
+            <span v-if="!readOnly && sortKey === 'joined_date'">
               {{ sortDirection === 'asc' ? '▲' : '▼' }}
             </span>
           </th>
-          <th class="px-4 py-3 text-center">Actions</th>
+          <th v-if="!readOnly" class="px-4 py-3 text-center">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -43,10 +43,10 @@
         >
           <td class="px-4 py-3">{{ employee.name }}</td>
           <td class="px-4 py-3">{{ employee.email }}</td>
-          <td class="px-4 py-3">{{ employee.department.name }}</td>
+          <td class="px-4 py-3">{{ employee.department?.name }}</td>
           <td class="px-4 py-3">{{ employee.designation }}</td>
           <td class="px-4 py-3">{{ formatDate(employee.joined_date) }}</td>
-          <td class="px-4 py-3 flex justify-center space-x-2">
+          <td v-if="!readOnly" class="px-4 py-3 flex justify-center space-x-2">
             <button
               @click="$emit('edit', employee)"
               class="text-primary-600 hover:text-primary-800"
@@ -84,7 +84,10 @@
           </td>
         </tr>
         <tr v-if="employees.length === 0">
-          <td colspan="6" class="text-center py-4 text-gray-500">
+          <td
+            :colspan="readOnly ? 5 : 6"
+            class="text-center py-4 text-gray-500"
+          >
             No employees found
           </td>
         </tr>
@@ -109,12 +112,17 @@ const props = defineProps({
     type: String,
     default: 'asc',
   },
+  readOnly: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 const emit = defineEmits(['edit', 'delete', 'sort']);
 
 // Method to format date
 const formatDate = (dateString) => {
+  if (!dateString) return '';
   return new Date(dateString).toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'short',
